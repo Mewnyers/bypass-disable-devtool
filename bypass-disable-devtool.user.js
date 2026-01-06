@@ -38,8 +38,10 @@
     }
 
     // --- Block or Modify Timers ---
-    const intervalThreshold = 1000;
-    const timeoutThreshold = 1000;
+    // Threshold set to 70ms: Most devtool detection uses intervals/timeouts in the 10-100ms range
+    // This avoids blocking legitimate animations (typically 16ms for 60fps) and UI updates
+    const intervalThreshold = 70;
+    const timeoutThreshold = 70;
     const originalSetInterval = window.setInterval;
     window.setInterval = function(callback, delay, ...args) {
         if (typeof delay === 'number' && delay <= intervalThreshold) {
@@ -85,38 +87,47 @@
             const originalListener = listener;
             const wrappedListener = function(event) {
                 const code = event.keyCode || event.which;
-                let isShortcut = false;
-                let shouldPreventBrowserDefault = false;
 
                 // --- Windows Shortcut Checks ---
-                if (event.ctrlKey && event.shiftKey && (code === 73 || code === 74)) { // Ctrl+Shift+I/J
-                    isShortcut = true;
-                    shouldPreventBrowserDefault = false;
-                    console.log(`${logPrefix} Allowing browser default for Ctrl+Shift+${code === 73 ? 'I' : 'J'}. Blocking site listener.`); // Keep Important Logs
+                // F12 key
+                if (code === 123) {
+                    event.stopImmediatePropagation();
+                    event.preventDefault();
+                    console.log(`${logPrefix} Blocking F12.`);
+                    return false;
                 }
-                else if (code === 123) { // F12
-                    isShortcut = true;
-                    shouldPreventBrowserDefault = true;
-                    console.log(`${logPrefix} Blocking F12.`); // Keep Important Logs
+                // Ctrl+Shift+I (DevTools)
+                else if (event.ctrlKey && event.shiftKey && code === 73) {
+                    event.stopImmediatePropagation();
+                    console.log(`${logPrefix} Allowing browser default for Ctrl+Shift+I. Blocking site listener.`);
+                    return false;
                 }
-                else if (event.ctrlKey && (code === 83 || code === 85)) { // Ctrl+S/U
-                    isShortcut = true;
-                    shouldPreventBrowserDefault = true;
-                    console.log(`${logPrefix} Blocking Ctrl+${code === 83 ? 'S' : 'U'}.`); // Keep Important Logs
+                // Ctrl+Shift+J (DevTools console)
+                else if (event.ctrlKey && event.shiftKey && code === 74) {
+                    event.stopImmediatePropagation();
+                    console.log(`${logPrefix} Allowing browser default for Ctrl+Shift+J. Blocking site listener.`);
+                    return false;
+                }
+                // Ctrl+S (Save)
+                else if (event.ctrlKey && code === 83) {
+                    event.stopImmediatePropagation();
+                    event.preventDefault();
+                    console.log(`${logPrefix} Blocking Ctrl+S.`);
+                    return false;
+                }
+                // Ctrl+U (View Source)
+                else if (event.ctrlKey && code === 85) {
+                    event.stopImmediatePropagation();
+                    event.preventDefault();
+                    console.log(`${logPrefix} Blocking Ctrl+U.`);
+                    return false;
                 }
 
-                if (isShortcut) {
-                    event.stopImmediatePropagation();
-                    if (shouldPreventBrowserDefault) {
-                        event.preventDefault();
-                        return false;
-                    }
-                } else {
-                    if (typeof originalListener === 'function') {
-                        return originalListener.apply(this, arguments);
-                    } else if (originalListener && typeof originalListener.handleEvent === 'function') {
-                       return originalListener.handleEvent.call(originalListener, event);
-                    }
+                // Not a protected shortcut - call original listener
+                if (typeof originalListener === 'function') {
+                    return originalListener.apply(this, arguments);
+                } else if (originalListener && typeof originalListener.handleEvent === 'function') {
+                    return originalListener.handleEvent.call(originalListener, event);
                 }
             };
             return originalAddEventListener.call(this, type, wrappedListener, options);
@@ -194,39 +205,79 @@
     try {
         const originalDefineProperty = Object.defineProperty;
         Object.defineProperty = function(obj, prop, descriptor) {
-            if (descriptor && descriptor.get && (prop === 'id') && obj instanceof HTMLElement) {
-                if (detailedLogging) console.log(`${logPrefix} Blocked suspicious getter for 'id' on element:`, obj);
-                return originalDefineProperty(obj, prop, {
-                    value: `bypassed-${prop}`, writable: false, configurable: false,
-                    enumerable: descriptor.enumerable !== undefined ? descriptor.enumerable : true,
-                });
+            // Block suspicious getters on HTMLElements that may detect DevTools
+            if (descriptor && descriptor.get && obj instanceof HTMLElement) {
+                const suspiciousProps = ['id', 'className', 'innerHTML', 'offsetHeight', 'offsetWidth'];
+                if (suspiciousProps.includes(prop)) {
+                    if (detailedLogging) console.log(`${logPrefix} Blocked suspicious getter for '${prop}' on element:`, obj);
+                    // Replace getter with simple value instead
+                    return originalDefineProperty(obj, prop, {
+                        value: descriptor.value || `bypassed-${prop}`,
+                        writable: true,
+                        configurable: true,
+                        enumerable: descriptor.enumerable !== undefined ? descriptor.enumerable : true,
+                    });
+                }
             }
             return originalDefineProperty.apply(this, arguments);
         };
-        Object.defineProperty = Object.defineProperty;
         if (detailedLogging) console.log(`${logPrefix} Object.defineProperty intercepted for suspicious getters.`);
     } catch(e) {
-        console.error(`${logPrefix} Failed to intercept Object.defineProperty:`, e); // Keep Error Logs
+        console.error(`${logPrefix} Failed to intercept Object.defineProperty:`, e);
     }
 
 
     // --- Attempt to expose and control disable-devtool state ---
     function suspendDisableDevtool() {
-        if (typeof window.DisableDevtool !== 'undefined' && typeof window.DisableDevtool.isSuspend !== 'undefined') {
+        let suspended = false;
+
+        // Check for DisableDevtool library
+        if (typeof window.DisableDevtool !== 'undefined') {
             try {
-                if (!window.DisableDevtool.isSuspend) {
-                     window.DisableDevtool.isSuspend = true;
-                     console.log(`${logPrefix} Found and suspended DisableDevtool via isSuspend.`); // Keep Important Log
+                // Method 1: Set isSuspend flag
+                if (typeof window.DisableDevtool.isSuspend !== 'undefined' && !window.DisableDevtool.isSuspend) {
+                    window.DisableDevtool.isSuspend = true;
+                    console.log(`${logPrefix} Found and suspended DisableDevtool via isSuspend.`);
+                    suspended = true;
                 }
-                return true;
+                // Method 2: Disable main disable function
+                if (typeof window.DisableDevtool.disable === 'function') {
+                    window.DisableDevtool.disable = function() {};
+                    if (detailedLogging) console.log(`${logPrefix} Disabled DisableDevtool.disable() function.`);
+                    suspended = true;
+                }
+                // Method 3: Override enable to keep it disabled
+                if (typeof window.DisableDevtool.enable === 'function') {
+                    const originalEnable = window.DisableDevtool.enable;
+                    window.DisableDevtool.enable = function() {
+                        if (detailedLogging) console.log(`${logPrefix} Intercepted DisableDevtool.enable() call.`);
+                    };
+                    suspended = true;
+                }
             } catch (e) {
-                 console.error(`${logPrefix} Error trying to set DisableDevtool.isSuspend:`, e); // Keep Error Log
+                console.error(`${logPrefix} Error trying to suspend DisableDevtool:`, e);
             }
         }
-        return false;
+
+        return suspended;
     }
+
+    // Initial attempt
     suspendDisableDevtool();
-    originalSetTimeout(suspendDisableDevtool, 50);
+
+    // Periodic monitoring for dynamically injected DisableDevtool
+    const disableDevtoolMonitorInterval = originalSetInterval(function() {
+        if (suspendDisableDevtool()) {
+            // Successfully suspended, stop monitoring
+            originalSetInterval(function() { }, 0); // Clear the interval
+            if (detailedLogging) console.log(`${logPrefix} DisableDevtool monitoring stopped after successful suspension.`);
+        }
+    }, 500);
+
+    // Also check on key lifecycle events
+    originalSetTimeout(suspendDisableDevtool, 100);
+    originalSetTimeout(suspendDisableDevtool, 500);
+    originalSetTimeout(suspendDisableDevtool, 1000);
 
     console.log(`${logPrefix} Bypass devtool-detection initialized.`); // Keep Final Log
 })();
