@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         bypass-devtool-detection
 // @namespace    http://tampermonkey.net/
-// @version      1.1
+// @version      1.2
 // @description  Bypasses multiple devtool detection techniques including event prevention
 // @author       itzzzme & Assistant
 // @match        *://*/*
@@ -40,8 +40,17 @@
     // --- Block or Modify Timers ---
     const intervalThreshold = 1000;
     const timeoutThreshold = 1000;
+
+    // --- Whitelist common legitimate delays ---
+    const whitelistedDelays = [0, 100];
+
     const originalSetInterval = window.setInterval;
     window.setInterval = function(callback, delay, ...args) {
+        // check whitelist
+        if (whitelistedDelays.includes(delay)) {
+            return originalSetInterval.call(this, callback, delay, ...args);
+        }
+
         if (typeof delay === 'number' && delay <= intervalThreshold) {
             if (detailedLogging) console.log(`${logPrefix} Blocked potential detection setInterval (delay: ${delay}ms).`);
             return originalSetInterval(function() {}, delay);
@@ -55,13 +64,18 @@
         if (callback === suspendDisableDevtool && delay === 50) {
              return originalSetTimeout.call(this, callback, delay, ...args);
         }
+        // check whitelist
+        if (whitelistedDelays.includes(delay)) {
+            return originalSetTimeout.call(this, callback, delay, ...args);
+        }
+
         if (typeof delay === 'number' && delay <= timeoutThreshold) {
             if (detailedLogging) console.log(`${logPrefix} Blocked potential detection setTimeout (delay: ${delay}ms).`);
             return originalSetTimeout(function() {}, delay);
         }
         return originalSetTimeout.call(this, callback, delay, ...args);
     };
-    if (detailedLogging) console.log(`${logPrefix} Timers intercepted (Interval <= ${intervalThreshold}ms, Timeout <= ${timeoutThreshold}ms).`);
+    if (detailedLogging) console.log(`${logPrefix} Timers intercepted (Interval <= ${intervalThreshold}ms, Timeout <= ${timeoutThreshold}ms, Whitelisted: ${whitelistedDelays.join(', ')}ms).`);
 
     // --- Block problematic event listeners ---
     const eventsToBlock = [
@@ -96,8 +110,8 @@
                 }
                 else if (code === 123) { // F12
                     isShortcut = true;
-                    shouldPreventBrowserDefault = true;
-                    console.log(`${logPrefix} Blocking F12.`); // Keep Important Logs
+                    shouldPreventBrowserDefault = false;
+                    console.log(`${logPrefix} Allowing F12 to open DevTools. Blocking site listener.`);
                 }
                 else if (event.ctrlKey && (code === 83 || code === 85)) { // Ctrl+S/U
                     isShortcut = true;
